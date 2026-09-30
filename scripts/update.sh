@@ -1267,9 +1267,34 @@ dep_feeds() {
 #   · 官方 OpenWrt / ImmortalWrt 发布版:releases/<版本>/targets/<平台>/kmods/<版本>-<n>-<哈希>/
 # 直连不通换国内镜像(GitHub → ghfast.top,官方 → 中科大)。只装依赖里写着同一个内核版本、SHA256 对得上的包;
 # 下到本地用 opkg install 装,不改用户的软件源配置
+# 整个查找最多 DEP_KMOD_BUDGET 秒:每次下载放到后台(直接是 curl / wget 本体,$! 就是它,杀得准),前台每秒看一眼,
+# 到点还没下完就杀掉。以前没有总时限,源站慢或连不上时每个地址都要等满自己的超时(GNU wget 超时后默认还要重试 20 次),
+# 升级一直停在这一步(v0.1.267~270,网友反馈「卡住升级不了」)
+DEP_KMOD_BUDGET=${DEP_KMOD_BUDGET:-45}
+DEP_KMOD_DEADLINE=0
 dep_get() {
-  if command -v curl >/dev/null 2>&1; then curl -fsSL --connect-timeout 10 --max-time 60 -o "$2" "$1" 2>/dev/null
-  else wget -q -T 30 -O "$2" "$1" 2>/dev/null; fi
+  [ "$(date +%s)" -lt "$DEP_KMOD_DEADLINE" ] || return 1
+  rm -f "$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --connect-timeout 5 --max-time 15 -o "$2" "$1" 2>/dev/null &
+  elif wget --version 2>/dev/null | grep -q 'GNU Wget'; then
+    wget -q --timeout=10 --tries=1 -O "$2" "$1" 2>/dev/null &
+  else
+    wget -q --timeout=10 -O "$2" "$1" 2>/dev/null &
+  fi
+  _dg_pid=$!
+  while kill -0 "$_dg_pid" 2>/dev/null; do
+    if [ "$(date +%s)" -ge "$DEP_KMOD_DEADLINE" ]; then
+      kill "$_dg_pid" 2>/dev/null
+      sleep 1
+      kill -9 "$_dg_pid" 2>/dev/null
+      wait "$_dg_pid" 2>/dev/null
+      rm -f "$2"
+      return 1
+    fi
+    sleep 1
+  done
+  wait "$_dg_pid"
 }
 dep_sha256() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi
@@ -1328,7 +1353,8 @@ dep_kmod_autofetch() {
   _ka_ver=$(dep_kernel_version)
   [ -n "$_ka_ver" ] || return 1
   _dep_kmod_searched=1
-  info "按本机内核版本 $_ka_ver 自动查找对得上的 kmod-nft-queue..."
+  DEP_KMOD_DEADLINE=$(($(date +%s) + DEP_KMOD_BUDGET))
+  info "按本机内核版本 $_ka_ver 自动查找对得上的 kmod-nft-queue(最多 $DEP_KMOD_BUDGET 秒)..."
   _ka_tmp="${TMPDIR:-/tmp}/openbox-kmod.$$"
   rm -rf "$_ka_tmp"
   mkdir -p "$_ka_tmp" || return 1
@@ -1354,6 +1380,8 @@ dep_kmod_autofetch() {
     done
   done
   rm -rf "$_ka_tmp"
+  # 到时限还没找完:提示要和「找过了、没有」分开说
+  [ "$(date +%s)" -lt "$DEP_KMOD_DEADLINE" ] || _dep_kmod_searched=2
   return 1
 }
 ensure_dependencies() {
@@ -1413,6 +1441,8 @@ ensure_dependencies() {
     _dep_pkg=$(dep_pkg "$_d")
     if [ -z "$_dep_pkg" ]; then
       warn "仍缺 $_d:$(dep_effect "$_d")。这个内核模块应随系统内核自带,请检查内核配置(modprobe ${_d#kmod-} 的报错)。"
+    elif [ "$_d" = "kmod-nft-queue" ] && [ "$_dep_kmod_searched" = "2" ]; then
+      warn "仍缺 $_d:$(dep_effect "$_d")。固件的软件源里装不上;自动查找 $DEP_KMOD_BUDGET 秒内没查完(网络慢?),下次升级时会再找一次,也可以从固件作者的软件源装。"
     elif [ "$_d" = "kmod-nft-queue" ] && [ "$_dep_kmod_searched" = "1" ]; then
       warn "仍缺 $_d:$(dep_effect "$_d")。固件的软件源里装不上,官方 OpenWrt / ImmortalWrt 和 sbwml 固件的内核模块源里也没有和本机内核对得上的包;要装只能从固件作者的软件源装。"
     elif [ "$_dep_updated" = "0" ]; then
