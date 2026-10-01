@@ -1206,7 +1206,6 @@ info "预检通过(架构 $ARCH,通道 $CHANNEL)。"
 DEP_TUN_DEV="${DEP_TUN_DEV:-/dev/net/tun}"
 DEP_SYS_MODULE="${DEP_SYS_MODULE:-/sys/module}"
 DEP_CA_BUNDLE="${DEP_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}"
-DEP_OPENWRT_RELEASE="${DEP_OPENWRT_RELEASE:-/etc/openwrt_release}"
 dep_ok() {
   case "$1" in
     kmod-tun) [ -e "$DEP_TUN_DEV" ] || { modprobe tun >/dev/null 2>&1; [ -e "$DEP_TUN_DEV" ]; } ;;
@@ -1259,131 +1258,6 @@ dep_feeds() {
     *) echo "软件源配置" ;;
   esac
 }
-# ---- 按本机内核版本自动找 queue 模块 ----
-# 固件自带的软件源里常常装不上 kmod-nft-queue:第三方固件的源里没有官方内核模块,或者源已经失效(sbwml 固件的
-# core.cooluc.com),用户自己去找又极麻烦(2026-09-30 香港两台)。内核模块必须和内核同一次编译完全一致,opkg 里
-# kernel 包的版本号就是这个身份(24.10 起 6.6.104~<哈希>-r1,23.05 是 5.15.167-1-<哈希>)。按它去已知的内核模块源找:
-#   · sbwml 固件:github.com/sbwml/openwrt_core 的 <架构> 分支、<版本号> 目录
-#   · 官方 OpenWrt / ImmortalWrt 发布版:releases/<版本>/targets/<平台>/kmods/<版本>-<n>-<哈希>/
-# 直连不通换国内镜像(GitHub → ghfast.top,官方 → 中科大)。只装依赖里写着同一个内核版本、SHA256 对得上的包;
-# 下到本地用 opkg install 装,不改用户的软件源配置
-# 整个查找最多 DEP_KMOD_BUDGET 秒:每次下载放到后台(直接是 curl / wget 本体,$! 就是它,杀得准),前台每秒看一眼,
-# 到点还没下完就杀掉。以前没有总时限,源站慢或连不上时每个地址都要等满自己的超时(GNU wget 超时后默认还要重试 20 次),
-# 升级一直停在这一步(v0.1.267~270,网友反馈「卡住升级不了」)
-DEP_KMOD_BUDGET=${DEP_KMOD_BUDGET:-45}
-DEP_KMOD_DEADLINE=0
-dep_get() {
-  [ "$(date +%s)" -lt "$DEP_KMOD_DEADLINE" ] || return 1
-  rm -f "$2"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --connect-timeout 5 --max-time 15 -o "$2" "$1" 2>/dev/null &
-  elif wget --version 2>/dev/null | grep -q 'GNU Wget'; then
-    wget -q --timeout=10 --tries=1 -O "$2" "$1" 2>/dev/null &
-  else
-    wget -q --timeout=10 -O "$2" "$1" 2>/dev/null &
-  fi
-  _dg_pid=$!
-  while kill -0 "$_dg_pid" 2>/dev/null; do
-    if [ "$(date +%s)" -ge "$DEP_KMOD_DEADLINE" ]; then
-      kill "$_dg_pid" 2>/dev/null
-      sleep 1
-      kill -9 "$_dg_pid" 2>/dev/null
-      wait "$_dg_pid" 2>/dev/null
-      rm -f "$2"
-      return 1
-    fi
-    sleep 1
-  done
-  wait "$_dg_pid"
-}
-dep_sha256() {
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi
-}
-dep_kernel_version() { opkg list-installed kernel 2>/dev/null | awk '$1 == "kernel" { print $3; exit }'; }
-dep_release_field() { sed -n "s/^$1='\(.*\)'\$/\1/p" "$DEP_OPENWRT_RELEASE" 2>/dev/null | head -n 1; }
-# 本机内核可能对得上的内核模块源,每行一个目录地址
-dep_kmod_bases() {
-  case "$1" in
-    *~*-r*) _kb_dir="${1%%~*}-${1##*-r}-$(echo "$1" | sed 's/^[^~]*~//; s/-r[0-9]*$//')" ;;
-    *) _kb_dir="$1" ;;
-  esac
-  _kb_arch=$(dep_release_field DISTRIB_ARCH)
-  _kb_rel=$(dep_release_field DISTRIB_RELEASE)
-  _kb_tgt=$(dep_release_field DISTRIB_TARGET)
-  case "$1" in
-    *~*)
-      case "$_kb_arch" in
-        x86_64|arm_cortex-a9) echo "https://raw.githubusercontent.com/sbwml/openwrt_core/$_kb_arch/$1" ;;
-        aarch64_*)
-          echo "https://raw.githubusercontent.com/sbwml/openwrt_core/aarch64_generic/$1"
-          echo "https://raw.githubusercontent.com/sbwml/openwrt_core/armsr-armv8/$1" ;;
-      esac ;;
-  esac
-  if [ -n "$_kb_rel" ] && [ -n "$_kb_tgt" ]; then
-    echo "https://downloads.openwrt.org/releases/$_kb_rel/targets/$_kb_tgt/kmods/$_kb_dir"
-    echo "https://downloads.immortalwrt.org/releases/$_kb_rel/targets/$_kb_tgt/kmods/$_kb_dir"
-  fi
-}
-# 同一个目录的国内镜像(直连不通时用)
-dep_kmod_mirror() {
-  case "$1" in
-    https://raw.githubusercontent.com/*) echo "https://ghfast.top/$1" ;;
-    https://downloads.openwrt.org/*) echo "https://mirrors.ustc.edu.cn/openwrt/${1#https://downloads.openwrt.org/}" ;;
-    https://downloads.immortalwrt.org/*) echo "https://mirrors.ustc.edu.cn/immortalwrt/${1#https://downloads.immortalwrt.org/}" ;;
-  esac
-}
-# 索引(Packages)里某个包的某个字段
-dep_pkg_field() {
-  awk -v p="$2" -v f="$3: " '$0 == "Package: " p { hit = 1; next } /^Package: / { hit = 0 } hit && index($0, f) == 1 { print substr($0, length(f) + 1); exit }' "$1"
-}
-# 从源目录 $1(索引已解到 $2)下载包 $3 到 $5:依赖里的内核版本必须是本机的 $4,SHA256 必须和索引一致。成功时打印本地路径
-dep_kmod_fetch_pkg() {
-  _kp_dep=$(dep_pkg_field "$2" "$3" Depends)
-  case "$_kp_dep" in *"kernel (=$4)"*) ;; *) return 1 ;; esac
-  _kp_file=$(dep_pkg_field "$2" "$3" Filename)
-  _kp_sha=$(dep_pkg_field "$2" "$3" SHA256sum)
-  [ -n "$_kp_file" ] && [ -n "$_kp_sha" ] || return 1
-  case "$_kp_file" in */*|*..*) return 1 ;; esac
-  dep_get "$1/$_kp_file" "$5/$_kp_file" || return 1
-  [ "$(dep_sha256 "$5/$_kp_file")" = "$_kp_sha" ] || { rm -f "$5/$_kp_file"; return 1; }
-  echo "$5/$_kp_file"
-}
-# 装上 kmod-nft-queue(连同还没装的 kmod-nfnetlink-queue)就返回 0
-dep_kmod_autofetch() {
-  _ka_ver=$(dep_kernel_version)
-  [ -n "$_ka_ver" ] || return 1
-  _dep_kmod_searched=1
-  DEP_KMOD_DEADLINE=$(($(date +%s) + DEP_KMOD_BUDGET))
-  info "按本机内核版本 $_ka_ver 自动查找对得上的 kmod-nft-queue(最多 $DEP_KMOD_BUDGET 秒)..."
-  _ka_tmp="${TMPDIR:-/tmp}/openbox-kmod.$$"
-  rm -rf "$_ka_tmp"
-  mkdir -p "$_ka_tmp" || return 1
-  _ka_rc=1
-  for _ka_base in $(dep_kmod_bases "$_ka_ver"); do
-    for _ka_try in "$_ka_base" "$(dep_kmod_mirror "$_ka_base")"; do
-      [ -n "$_ka_try" ] || continue
-      rm -f "$_ka_tmp"/*
-      dep_get "$_ka_try/Packages.gz" "$_ka_tmp/Packages.gz" || continue
-      gunzip -c "$_ka_tmp/Packages.gz" > "$_ka_tmp/Packages" 2>/dev/null || continue
-      _ka_q=$(dep_kmod_fetch_pkg "$_ka_try" "$_ka_tmp/Packages" kmod-nft-queue "$_ka_ver" "$_ka_tmp") || continue
-      _ka_n=""
-      if ! opkg list-installed kmod-nfnetlink-queue 2>/dev/null | grep -q .; then
-        _ka_n=$(dep_kmod_fetch_pkg "$_ka_try" "$_ka_tmp/Packages" kmod-nfnetlink-queue "$_ka_ver" "$_ka_tmp") || continue
-      fi
-      # 找到了对得上的包:装一次,成不成都不再往下找(别的源不会有同一次编译的另一份)
-      if opkg install $_ka_n "$_ka_q" >/dev/null 2>&1 && dep_ok kmod-nft-queue; then
-        info "kmod-nft-queue 已装上(来自 $(echo "$_ka_try" | awk -F/ '{print $3}'))。"
-        _ka_rc=0
-      fi
-      rm -rf "$_ka_tmp"
-      return "$_ka_rc"
-    done
-  done
-  rm -rf "$_ka_tmp"
-  # 到时限还没找完:提示要和「找过了、没有」分开说
-  [ "$(date +%s)" -lt "$DEP_KMOD_DEADLINE" ] || _dep_kmod_searched=2
-  return 1
-}
 ensure_dependencies() {
   if [ "${OPENBOX_SKIP_DEPS:-}" = "1" ]; then
     info "按 OPENBOX_SKIP_DEPS=1 跳过系统依赖检查。"
@@ -1402,7 +1276,6 @@ ensure_dependencies() {
   _dep_updated=1
   _dep_unknown=""
   _dep_kernel=""
-  _dep_kmod_searched=0
   if command -v opkg >/dev/null 2>&1; then _dep_pm=opkg; _dep_verb="opkg install"
   elif command -v apk >/dev/null 2>&1; then _dep_pm=apk; _dep_verb="apk add"
   elif command -v apt-get >/dev/null 2>&1; then _dep_pm=apt-get; _dep_verb="apt-get install -y --no-install-recommends"; export DEBIAN_FRONTEND=noninteractive
@@ -1428,9 +1301,6 @@ ensure_dependencies() {
       esac
     done
   fi
-  case " $_dep_missing " in
-    *" kmod-nft-queue "*) [ "$_dep_pm" = "opkg" ] && ! dep_ok kmod-nft-queue && dep_kmod_autofetch ;;
-  esac
   _dep_still=""
   for _d in $_dep_missing; do dep_ok "$_d" || _dep_still="$_dep_still $_d"; done
   if [ -z "$_dep_still" ]; then
@@ -1441,10 +1311,14 @@ ensure_dependencies() {
     _dep_pkg=$(dep_pkg "$_d")
     if [ -z "$_dep_pkg" ]; then
       warn "仍缺 $_d:$(dep_effect "$_d")。这个内核模块应随系统内核自带,请检查内核配置(modprobe ${_d#kmod-} 的报错)。"
-    elif [ "$_d" = "kmod-nft-queue" ] && [ "$_dep_kmod_searched" = "2" ]; then
-      warn "仍缺 $_d:$(dep_effect "$_d")。固件的软件源里装不上;自动查找 $DEP_KMOD_BUDGET 秒内没查完(网络慢?),下次升级时会再找一次,也可以从固件作者的软件源装。"
-    elif [ "$_d" = "kmod-nft-queue" ] && [ "$_dep_kmod_searched" = "1" ]; then
-      warn "仍缺 $_d:$(dep_effect "$_d")。固件的软件源里装不上,官方 OpenWrt / ImmortalWrt 和 sbwml 固件的内核模块源里也没有和本机内核对得上的包;要装只能从固件作者的软件源装。"
+    elif [ "$_d" = "kmod-nft-queue" ]; then
+      # 用户 2026-10-01:装不上就不管了——提示不装也能用,给出手动安装命令,用户自己装。v0.1.267~272 会按内核版本
+      # 去别的源自动找,而且找不到时把整个安装 / 升级带退出了(set -e,GitHub #354 #358),这段已经拿掉
+      _dep_why=""
+      case " $_dep_unknown " in *" $_d "*) _dep_why="固件的软件源里没有这个包,要从固件作者的软件源装" ;; esac
+      case " $_dep_kernel " in *" $_d "*) _dep_why="软件源里的包和本机内核版本对不上,要从固件作者的软件源装" ;; esac
+      [ "$_dep_updated" = "0" ] && _dep_why="${_dep_pm:-opkg} update 没成功,先检查 $(dep_feeds) 里的软件源地址"
+      warn "仍缺 $_d:$(dep_effect "$_d")。不装也能用;要装请自行执行:${_dep_pm:-opkg} update && ${_dep_verb:-opkg install} $_dep_pkg${_dep_why:+($_dep_why)}"
     elif [ "$_dep_updated" = "0" ]; then
       warn "仍缺 $_d:$(dep_effect "$_d")。$_dep_pm update 没成功,软件源连不上时什么包都装不了:先检查 $(dep_feeds) 里的软件源地址(国内连不上官方源可换镜像),等 $_dep_pm update 能成功后再执行:$_dep_pm update && $_dep_verb $_dep_pkg"
     else
