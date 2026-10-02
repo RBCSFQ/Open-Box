@@ -969,6 +969,17 @@ if [ "$DETACH" = "1" ]; then
   # systemd-run --scope 在本进程里 exec,环境变量、日志重定向原样带过去,只是换进一个自己的临时 scope。
   # 不给固定单元名:上次失败留下的同名 scope 会让这次报 unit already exists。先空跑一次确认能用,不能用
   # 再退回 setsid——不能拿 worker 的退出码判断,worker 升级失败也是非 0,退回去就成了升两次
+  # OpenWrt 同理(#375):procd 把每个服务实例放进自己的 cgroup(/sys/fs/cgroup/services/<服务>/<实例>),从面板
+  # 发起时派发进程和 worker 都在面板那一组里。2026-09 下旬起的 procd(OpenWrt SNAPSHOT;instance_free →
+  # instance_remove_cgroup)停服务时先把组里剩下的进程全杀掉再删目录,下面「停止服务」停面板时 worker、正在跑的
+  # 「停内核」和它触发的 dnsmasq 重启一起没了:停在 committing、面板停着、内核还在跑。派生 worker 之前先把派发
+  # 进程挪进根 cgroup(cgroup v2 的根不受「内部进程」限制),worker 跟着就不在面板那一组了。挪不动就照旧派发
+  # (老 procd 停服务只删空目录、不杀组里的进程,照样能升)
+  if [ -r /etc/openwrt_release ] && grep -q '^0::/services/' /proc/self/cgroup 2>/dev/null \
+    && [ -w /sys/fs/cgroup/cgroup.procs ]; then
+    echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null \
+      || warn "没能把升级进程挪出 $(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null),较新的 procd 停面板时可能把它一起结束;遇到请 SSH 登录后运行 open-box update"
+  fi
   if [ ! -r /etc/openwrt_release ] && [ -d /run/systemd/system ] && command -v systemd-run >/dev/null 2>&1 \
     && systemd-run --scope --quiet true >/dev/null 2>&1; then
     OPENBOX_UPDATE_CHANNEL_OVERRIDE="$CHANNEL_OVERRIDE" OPENBOX_UPDATE_MIRROR_PREFIX="$CLI_MIRROR_PREFIX" OPENBOX_UPDATE_EXPECT="$EXPECT_VERSION" OPENBOX_UPDATE_DISPATCHED=1 \
@@ -1814,12 +1825,19 @@ restart_core() {
     write_status restarting_core "" "" "面板已重启,正在重新生成配置并启动内核"
     info "升级前内核在运行,重新生成配置并启动内核..."
     # LD_PRELOAD:内核缺 madvise 的设备上 Node 要带兼容库(冒烟测试记在 data/node-preload,没有就是空)
-    if OPENBOX_ROOT="$INSTALL_ROOT" ZASHBOARD_DB_PATH="$INSTALL_ROOT/data/openbox.sqlite" \
+    # 部署的输出留在 $_deploy_out:以前整个丢进 /dev/null,升级后内核没起来时用户和我们都看不到原因
+    # (#354 #369 #376 #378;失败的那次连部署状态都没写,面板里也查不到)。失败时把最后几行带进升级日志
+    _deploy_out="${TMPDIR:-/tmp}/openbox-update-deploy.log"
+    # 先 cd /:升级是在 panel/ 里发起的话(比如在那个目录下敲 open-box update),当前目录已经随旧版本删掉,
+    # Node 加载依赖时 process.cwd() 直接 ENOENT 崩掉,部署一步没走(开发路由器上复现过)
+    if (cd / && OPENBOX_ROOT="$INSTALL_ROOT" ZASHBOARD_DB_PATH="$INSTALL_ROOT/data/openbox.sqlite" \
        LD_PRELOAD="$(cat "$INSTALL_ROOT/data/node-preload" 2>/dev/null)" \
-       OPENSSL_CONF=/dev/null LD_LIBRARY_PATH="$INSTALL_ROOT/node/lib" "$INSTALL_ROOT/node/bin/node" "$DEPLOY_CLI" >/dev/null 2>&1; then
+       OPENSSL_CONF=/dev/null LD_LIBRARY_PATH="$INSTALL_ROOT/node/lib" "$INSTALL_ROOT/node/bin/node" "$DEPLOY_CLI") >"$_deploy_out" 2>&1; then
       CORE_MSG="内核已重新生成配置并启动。"
     else
-      warn "内核启动失败(配置生成或校验没通过),请到面板查看原因后重新启动。"
+      _deploy_rc=$?
+      warn "内核启动失败(部署退出码 $_deploy_rc),部署输出的最后几行(全文在 $_deploy_out):"
+      tail -n 15 "$_deploy_out" 2>/dev/null | sed 's/^/    /' >&2
       CORE_MSG="内核启动失败,请到面板查看原因后重新启动。"
     fi
   else
