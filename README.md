@@ -9,8 +9,9 @@
 
 - **OpenWrt**（含 iStoreOS、ImmortalWrt 等衍生固件）：x86_64、aarch64；主路由或旁路由都行，带 LuCI 页面
 - **Debian / Ubuntu**（需要 systemd；Ubuntu 24.04 验证过）：x86_64、aarch64；作为旁路由或只给本机用，没有 LuCI 和 dnsmasq 分流，见[安装](#安装)里的 Debian / Ubuntu 一节
+- **Android 手机**（Open-Box App）：Android 12 及以上、64 位 ARM；和家里的 Open-Box 配对使用，在外面也按同一套规则分流，见[安卓客户端](#安卓客户端)
 
-同一份安装包、同一条安装命令，脚本自己识别系统。
+路由器 / 主机用同一份安装包、同一条安装命令，脚本自己识别系统。
 
 ## 使用说明视频
 
@@ -68,6 +69,27 @@
   <img src="docs/pic/mobile-proxies.webp" alt="手机端代理" width="45%">
 </p>
 
+## 安卓客户端
+
+Open-Box App 把家里路由器的分流规则带到手机上：在外面也按同一套规则分流，App 里的内核和路由器是同一个 sing-box。
+
+- **安装与升级**：从 [Releases](https://github.com/liandu2024/Open-Box/releases/latest) 下载 `open-box-android-<版本>.apk`，第一次手动安装（系统会提示允许安装来自浏览器 / 文件管理器的应用）；以后在 App「设置 → 检查更新」里一键升级。
+- **节点分流**：在面板「设置 → 客户端」的「节点分流（客户端）」里扫共享网络服务器的码。手机按所在地区选一组规则（「地区分流」，可以自动定位），国内网站本地直连，其余经家里的路由器出去；路由器要有公网 IP。
+- **本地分流**：扫面板「本地分流（客户端）」的码，或导入那里导出的文件。路由器的订阅节点、节点组、目标分流、链式代理整套导进手机，手机自己分流、不经过路由器；路由器上改了配置，在 App 里同步一下就跟上，订阅在手机本机按计划刷新。
+- **和路由器一样的分流**：选了直连的流量不进内核；「连接」页能看每条连接走哪条线路、看内核日志，「路由」页签输入网址就能看它按哪条规则走（规则路由）、实际访问时怎么走（真实路由）。
+- **其他**：连上指定的 Wi-Fi（比如到家后）自动暂停 VPN、IPv6 开关、简体 / 繁體 / English、亮色 / 深色主题。
+
+首页（节点分流）、代理 · 策略（本地分流）、连接 · 路由、设置：
+
+<p>
+  <img src="docs/pic/app-home.webp" alt="App 首页" width="45%">
+  <img src="docs/pic/app-proxies.webp" alt="App 代理 · 策略" width="45%">
+</p>
+<p>
+  <img src="docs/pic/app-route.webp" alt="App 连接 · 路由" width="45%">
+  <img src="docs/pic/app-settings.webp" alt="App 设置" width="45%">
+</p>
+
 ## 主要功能
 
 - **订阅与节点**：支持 Clash 配置、base64 节点分享和 shadowsocks、vmess、vless（含 REALITY）、trojan、hysteria2（含端口跳跃）、tuic、anytls、wireguard 等协议。节点命名遵循 Open-Box 的重命名规则：有重命名时使用重命名，没有重命名时保留原名称。
@@ -94,6 +116,7 @@
 
 - `x64`：x86_64 路由器 / 主机
 - `arm64`：aarch64 路由器 / 主机
+- `open-box-android-<版本>.apk`：安卓客户端（见[安卓客户端](#安卓客户端)）
 
 同一份安装包既能装在 OpenWrt 上，也能装在 Debian / Ubuntu（systemd）上，安装脚本会自行识别（见[安装](#安装)末尾）。
 
